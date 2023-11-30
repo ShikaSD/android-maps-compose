@@ -7,6 +7,9 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.AbstractComposeView
 import androidx.core.graphics.applyCanvas
 import androidx.core.view.doOnAttach
@@ -49,6 +52,7 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
 
     private val fakeCanvas = Canvas()
     private val keysToViews = mutableMapOf<ViewKey<T>, ViewInfo>()
+    private val recyclingPool = RecyclingPool()
 
     override fun onClustersChanged(clusters: Set<Cluster<T>>) {
         super.onClustersChanged(clusters)
@@ -58,13 +62,17 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
             forEach { (key, viewInfo) ->
                 if (key !in keys) {
                     remove()
-                    viewInfo.onRemove()
+                    if (!recyclingPool.addView(viewInfo)) {
+                        viewInfo.onRemove()
+                    }
                 }
             }
         }
         keys.forEach { key ->
             if (key !in keysToViews.keys) {
-                createAndAddView(key)
+                keysToViews[key] =
+                    recyclingPool.takeView()?.also { it.view.setContent(contentForKey(key)) }
+                        ?: createAndAddView(key)
             }
         }
     }
@@ -83,18 +91,21 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
         }
     }
 
+    private fun contentForKey(key: ViewKey<T>): @Composable () -> Unit =
+        when (key) {
+            is ViewKey.Cluster -> {
+                { clusterContentState.value?.invoke(key.cluster) }
+            }
+
+            is ViewKey.Item -> {
+                { clusterItemContentState.value?.invoke(key.item) }
+            }
+        }
+
     private fun createAndAddView(key: ViewKey<T>): ViewInfo {
         val view = InvalidatingComposeView(
             context,
-            content = when (key) {
-                is ViewKey.Cluster -> {
-                    { clusterContentState.value?.invoke(key.cluster) }
-                }
-
-                is ViewKey.Item -> {
-                    { clusterItemContentState.value?.invoke(key.item) }
-                }
-            }
+            contentForKey(key)
         )
         val renderHandle = viewRendererState.value.startRenderingView(view)
         val rerenderJob = scope.launch {
@@ -108,7 +119,6 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
                 renderHandle.dispose()
             },
         )
-        keysToViews[key] = viewInfo
         return viewInfo
     }
 
@@ -201,7 +211,7 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
     }
 
     private class ViewInfo(
-        val view: AbstractComposeView,
+        val view: InvalidatingComposeView,
         val onRemove: () -> Unit,
     )
 
@@ -211,13 +221,18 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
      */
     private class InvalidatingComposeView(
         context: Context,
-        private val content: @Composable () -> Unit,
+        content: @Composable () -> Unit,
     ) : AbstractComposeView(context) {
 
+        private var viewContent by mutableStateOf(content)
         var onInvalidate: (() -> Unit)? = null
 
+        fun setContent(content: @Composable () -> Unit) {
+            viewContent = content
+        }
+
         @Composable
-        override fun Content() = content()
+        override fun Content() = viewContent()
 
         override fun onDescendantInvalidated(child: View, target: View) {
             super.onDescendantInvalidated(child, target)
@@ -225,4 +240,19 @@ internal class ComposeUiClusterRenderer<T : ClusterItem>(
         }
     }
 
+    private class RecyclingPool(val maxViews: Int = 30) {
+        private val views = mutableListOf<ViewInfo>()
+
+        fun addView(view: ViewInfo): Boolean {
+            if (views.size < maxViews) {
+                views.add(view)
+                return true
+            }
+            return false
+        }
+
+        fun takeView(): ViewInfo? =
+            views.removeLastOrNull()
+
+    }
 }

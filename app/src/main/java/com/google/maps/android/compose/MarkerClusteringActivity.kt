@@ -58,7 +58,7 @@ class MarkerClusteringActivity : ComponentActivity() {
 fun GoogleMapClustering() {
     val items = remember { mutableStateListOf<MyItem>() }
     LaunchedEffect(Unit) {
-        for (i in 1..10) {
+        for (i in 1..1000) {
             val position = LatLng(
                 singapore2.latitude + Random.nextFloat(),
                 singapore2.longitude + Random.nextFloat(),
